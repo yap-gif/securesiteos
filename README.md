@@ -1,36 +1,140 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SecureSiteOS
 
-## Getting Started
+SecureSiteOS is an experimental full-stack web application and security engineering portfolio project built with Next.js, Supabase, and Stripe.
 
-First, run the development server:
+It explores explainable HTTP request-risk scoring, security event logging, authentication, and subscription billing.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+**Status:** MVP / work in progress. This is not a production-ready Zero Trust platform or a fully validated web application firewall.
+
+## Technology Stack
+
+- Next.js 16.1.6 (App Router)
+- React 19.2.3 and TypeScript
+- Tailwind CSS 4
+- Supabase JavaScript SDK
+- Stripe SDK
+
+See `package.json` for dependency declarations.
+
+## Implemented Code Paths
+
+### Request Risk Scoring
+
+`src/lib/security.ts` implements a rule-based risk score and an ALLOW/BLOCK decision.
+
+Signals defined in the scoring module include:
+
+- HIGH_FREQUENCY
+- SUSPICIOUS_PATH
+- BAD_UA
+- GEO_BLOCK
+- METHOD_ABUSE
+
+`src/proxy.ts` connects request inspection with the scoring module. It uses request path, method, user agent, and a cookie-based request counter.
+
+Country information is not currently passed into the scoring function by this proxy.
+
+### Security Event Logging
+
+`src/app/api/security/log/route.ts` handles security event ingestion and attempts to store records in the Supabase `security_logs` table.
+
+This endpoint currently uses a hardcoded internal secret. It is not suitable for production security telemetry without additional hardening.
+
+### Authentication
+
+`src/app/login/page.tsx` implements client-side email/password registration and sign-in using Supabase.
+
+`src/app/dashboard/layout.tsx` separately expects a server-readable `sb-access-token` cookie and checks subscription status.
+
+The session handoff between these components requires further implementation and verification.
+
+### Subscription Billing
+
+`src/app/api/billing/checkout/route.ts` implements a Stripe Checkout Session creation endpoint with Supabase token verification.
+
+`src/app/api/billing/webhook/route.ts` contains handlers for:
+
+- customer.subscription.created
+- customer.subscription.updated
+- customer.subscription.deleted
+
+These are code-level implementations. Complete payment lifecycle and webhook database persistence have not been independently verified.
+
+### Dashboard and Logs
+
+- `/dashboard` currently provides an MVP overview and placeholder content.
+- `/dashboard/logs` attempts to display recent security log records.
+- Database access is subject to the actual Supabase configuration and row-level security policies.
+
+## Local Development
+
+### Requirements
+
+- Node.js 20.9 or later
+- npm
+- Supabase project
+- Stripe test account for billing functionality
+
+### Environment Configuration
+
+Create `.env.local` in the project root. Required and referenced configuration includes:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=replace_me
+SUPABASE_SERVICE_ROLE_KEY=replace_me
+
+STRIPE_SECRET_KEY=sk_test_replace_me
+STRIPE_WEBHOOK_SECRET=whsec_replace_me
+STRIPE_PRICE_BASIC=price_replace_me
+STRIPE_PRICE_PRO=price_replace_me
+STRIPE_PRICE_ENTERPRISE=price_replace_me
+
+NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Replace placeholders with your own development credentials.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Never commit `.env.local` or expose service-role and Stripe secret keys in client-side code.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Install and Run
 
-## Learn More
+```powershell
+npm ci
+npm run dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+Open http://localhost:3000.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+A working Supabase schema, suitable RLS policies, valid credentials, and Stripe configuration are required for relevant functionality. Database migration files are not currently included in this repository.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Verification
 
-## Deploy on Vercel
+Available npm scripts:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```powershell
+npm run lint
+npm run build
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The repository currently has no dedicated automated test script in `package.json`.
+
+These commands must be executed before claiming that a build or quality gate has passed.
+
+## Known Limitations and Technical Debt
+
+- Hardcoded internal authentication secret for security logging.
+- Broad proxy matcher and potential internal request re-entry.
+- Cookie-based request counting is not reliable distributed rate limiting.
+- Client-side authentication session is not synchronized with the dashboard's expected cookie flow.
+- Security log access depends on external Supabase RLS configuration.
+- Stripe webhook database errors are not consistently surfaced.
+- Debug security headers are exposed in responses.
+- No committed Supabase schema migrations.
+- No automated unit or integration test suite.
+
+These items are documented engineering work, not resolved security controls.
+
+## Project Scope
+
+SecureSiteOS demonstrates early-stage full-stack and defensive application engineering concepts. Further security hardening, integration testing, and operational validation are required before production use.
