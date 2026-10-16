@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { calcRiskSignals, decideAction } from "./lib/security";
 
 export const config = {
@@ -16,6 +16,11 @@ function getIP(req: NextRequest) {
 export default async function proxy(req: NextRequest) {
   const ip = getIP(req);
   const path = req.nextUrl.pathname;
+
+  // Direct telemetry requests must not generate further telemetry requests.
+  if (path === "/api/security/log" || path.startsWith("/api/security/log/")) {
+    return NextResponse.next();
+  }
   const ua = req.headers.get("user-agent") || "";
   const method = req.method;
 
@@ -49,11 +54,13 @@ export default async function proxy(req: NextRequest) {
 
   // ✅ 异步记录日志（不阻塞请求）
   const logUrl = new URL("/api/security/log", req.url);
-  fetch(logUrl, {
+  const telemetrySecret = process.env.INTERNAL_TELEMETRY_SECRET;
+  if (telemetrySecret && telemetrySecret.trim().length >= 32) {
+    fetch(logUrl, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-internal-secret": "dev-secret",
+      "x-internal-secret": telemetrySecret,
     },
     body: JSON.stringify({
       site_id: null,
@@ -70,12 +77,16 @@ export default async function proxy(req: NextRequest) {
         ? "Delivery"
         : "Reconnaissance",
     }),
-  }).catch(() => {});
+    }).catch(() => {});
+  }
 
+  // Do not forward a caller-supplied internal authentication header to app routes.
+  const forwardedHeaders = new Headers(req.headers);
+  forwardedHeaders.delete("x-internal-secret");
   const res =
     action === "BLOCK"
       ? new NextResponse("Blocked by SecureSite OS", { status: 403 })
-      : NextResponse.next();
+      : NextResponse.next({ request: { headers: forwardedHeaders } });
 
   // Debug headers（方便你验证）
   res.headers.set("x-securesite-action", action);
