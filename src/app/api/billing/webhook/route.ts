@@ -2,14 +2,12 @@ import Stripe from "stripe";
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2024-06-20" as any,
-});
+
 
 // webhook 里不要过度相信 typings，用安全读取
-function getUnix(obj: any, key: string): number | null {
-  const v = obj?.[key];
-  return typeof v === "number" ? v : null;
+function getUnix(obj: object | null | undefined, key: string): number | null {
+  const value: unknown = obj ? Reflect.get(obj, key) : null;
+  return typeof value === "number" ? value : null;
 }
 
 function toIsoFromUnix(ts: number | null) {
@@ -20,19 +18,26 @@ export async function POST(req: Request) {
   const sig = req.headers.get("stripe-signature");
   if (!sig) return NextResponse.json({ error: "Missing stripe-signature" }, { status: 400 });
 
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!stripeKey || !webhookSecret) {
+    return NextResponse.json({ error: "Stripe webhook is not configured" }, { status: 503 });
+  }
+  const stripe = new Stripe(stripeKey);
   const rawBody = await req.text();
 
   let event: Stripe.Event;
   try {
-    event = stripe.webhooks.constructEvent(rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET!);
-  } catch (e: any) {
-    return NextResponse.json({ error: `Webhook signature failed: ${e.message}` }, { status: 400 });
+    event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Invalid webhook signature";
+    return NextResponse.json({ error: `Webhook signature failed: ${message}` }, { status: 400 });
   }
 
   const supabaseAdmin = getSupabaseAdmin();
   if (!supabaseAdmin) return NextResponse.json({ error: "Server not configured" }, { status: 500 });
 
-  const upsertFromSubscription = async (sub: any) => {
+  const upsertFromSubscription = async (sub: Stripe.Subscription) => {
     const userId = (sub?.metadata?.user_id ?? null) as string | null;
     if (!userId) return;
 
@@ -58,11 +63,11 @@ export async function POST(req: Request) {
     event.type === "customer.subscription.created" ||
     event.type === "customer.subscription.updated"
   ) {
-    await upsertFromSubscription(event.data.object as any);
+    await upsertFromSubscription(event.data.object as Stripe.Subscription);
   }
 
   if (event.type === "customer.subscription.deleted") {
-    const sub = event.data.object as any;
+    const sub = event.data.object as Stripe.Subscription;
     const userId = (sub?.metadata?.user_id ?? null) as string | null;
 
     if (userId) {

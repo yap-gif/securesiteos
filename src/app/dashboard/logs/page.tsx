@@ -52,7 +52,11 @@ export default async function LogsPage() {
                   <td className="p-3">
                     <code className="text-xs">
                       {Array.isArray(row.signals)
-                        ? row.signals.map((s: any) => s.type).join(", ")
+                        ? row.signals.map((s: unknown) => (
+                            s !== null && typeof s === "object" && "type" in s && typeof s.type === "string"
+                              ? s.type
+                              : "UNKNOWN"
+                          )).join(", ")
                         : JSON.stringify(row.signals)}
                     </code>
                   </td>

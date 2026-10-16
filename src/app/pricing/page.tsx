@@ -26,7 +26,7 @@ export default function PricingPage() {
     const { data } = await supabase.auth.getSession();
     const token = data.session?.access_token;
     if (!token) {
-      window.location.href = "/login";
+      window.location.assign("/login");
       return;
     }
 
@@ -38,7 +38,7 @@ export default function PricingPage() {
 
     const json = await res.json();
     if (!res.ok) return setMsg(json.error || "Checkout failed");
-    window.location.href = json.url;
+    window.location.assign(json.url);
   }
 
   return (
