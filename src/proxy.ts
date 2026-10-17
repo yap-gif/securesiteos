@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createServerClient } from "@supabase/ssr";
 import { calcRiskSignals, decideAction } from "./lib/security";
 
 export const config = {
@@ -18,7 +19,12 @@ export default async function proxy(req: NextRequest) {
   const path = req.nextUrl.pathname;
 
   // Direct telemetry requests must not generate further telemetry requests.
-  if (path === "/api/security/log" || path.startsWith("/api/security/log/")) {
+  if (
+    path === "/api/security/log" ||
+    path.startsWith("/api/security/log/") ||
+    path.startsWith("/_next/") ||
+    path === "/favicon.ico"
+  ) {
     return NextResponse.next();
   }
   const ua = req.headers.get("user-agent") || "";
@@ -83,10 +89,42 @@ export default async function proxy(req: NextRequest) {
   // Do not forward a caller-supplied internal authentication header to app routes.
   const forwardedHeaders = new Headers(req.headers);
   forwardedHeaders.delete("x-internal-secret");
-  const res =
+  let res =
     action === "BLOCK"
       ? new NextResponse("Blocked by SecureSite OS", { status: 403 })
       : NextResponse.next({ request: { headers: forwardedHeaders } });
+
+  // Refresh Supabase cookies for protected dashboard requests only.
+  // DashboardLayout independently verifies both user identity and subscription.
+  if (action !== "BLOCK" && (path === "/dashboard" || path.startsWith("/dashboard/"))) {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (url && anonKey) {
+      const server = createServerClient(url, anonKey, {
+        cookies: {
+          getAll() {
+            return req.cookies.getAll();
+          },
+          setAll(cookiesToSet) {
+            cookiesToSet.forEach(({ name, value }) => req.cookies.set(name, value));
+            const refreshedHeaders = new Headers(req.headers);
+            refreshedHeaders.delete("x-internal-secret");
+            const precedingCookies = res.cookies.getAll();
+            res = NextResponse.next({ request: { headers: refreshedHeaders } });
+            precedingCookies.forEach((cookie) => res.cookies.set(cookie));
+            cookiesToSet.forEach(({ name, value, options }) =>
+              res.cookies.set(name, value, options)
+            );
+          },
+        },
+      });
+      try {
+        await server.auth.getUser();
+      } catch {
+        // Never grant access on refresh failure: the dashboard layout rejects it.
+      }
+    }
+  }
 
   // Debug headers（方便你验证）
   res.headers.set("x-securesite-action", action);
