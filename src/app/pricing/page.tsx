@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 type Plan = { key: "basic" | "pro" | "enterprise"; name: string; price: string };
@@ -12,8 +13,25 @@ const plans: Plan[] = [
 ];
 
 export default function PricingPage() {
+  return (
+    <Suspense fallback={<main className="min-h-screen p-8">Loading pricing...</main>}>
+      <PricingContent />
+    </Suspense>
+  );
+}
+
+function PricingContent() {
+  const searchParams = useSearchParams();
   const [userId, setUserId] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
+
+  const checkoutStatus = searchParams.get("checkout");
+  const checkoutNotice =
+    checkoutStatus === "processing"
+      ? "Test checkout returned. Subscription confirmation is pending webhook processing; refresh the dashboard after confirmation."
+      : checkoutStatus === "cancelled"
+        ? "Test checkout was cancelled; your subscription was not changed."
+        : "";
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -67,7 +85,7 @@ export default function PricingPage() {
           ))}
         </div>
 
-        {msg && <div className="rounded border p-3 text-sm">{msg}</div>}
+        {(msg || checkoutNotice) && <div className="rounded border p-3 text-sm">{msg || checkoutNotice}</div>}
       </div>
     </main>
   );

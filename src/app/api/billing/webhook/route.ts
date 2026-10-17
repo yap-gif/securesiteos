@@ -1,88 +1,90 @@
 import Stripe from "stripe";
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import {
+  BillingGuardError, isTestKey, reconcileTestSubscription,
+  type StoredSubscription, type SubscriptionWrite,
+} from "@/lib/billingCore";
 
+export const runtime = "nodejs";
 
-
-// webhook 里不要过度相信 typings，用安全读取
-function getUnix(obj: object | null | undefined, key: string): number | null {
-  const value: unknown = obj ? Reflect.get(obj, key) : null;
-  return typeof value === "number" ? value : null;
-}
-
-function toIsoFromUnix(ts: number | null) {
-  return ts ? new Date(ts * 1000).toISOString() : null;
-}
+const SUBSCRIPTION_EVENTS = new Set([
+  "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted",
+]);
 
 export async function POST(req: Request) {
-  const sig = req.headers.get("stripe-signature");
-  if (!sig) return NextResponse.json({ error: "Missing stripe-signature" }, { status: 400 });
-
-  const stripeKey = process.env.STRIPE_SECRET_KEY;
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!stripeKey || !webhookSecret) {
-    return NextResponse.json({ error: "Stripe webhook is not configured" }, { status: 503 });
+  const signature = req.headers.get("stripe-signature");
+  if (!signature) return NextResponse.json({ error: "Missing signature" }, { status: 400 });
+  const key = process.env.STRIPE_SECRET_KEY;
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!isTestKey(key) || !secret?.startsWith("whsec_")) {
+    return NextResponse.json({ error: "Stripe TEST webhook not configured" }, { status: 503 });
   }
-  const stripe = new Stripe(stripeKey);
-  const rawBody = await req.text();
-
+  const stripe = new Stripe(key!);
+  const raw = await req.text();
   let event: Stripe.Event;
   try {
-    event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Invalid webhook signature";
-    return NextResponse.json({ error: `Webhook signature failed: ${message}` }, { status: 400 });
+    event = stripe.webhooks.constructEvent(raw, signature, secret);
+  } catch {
+    // Never reflect raw signature/body/secret back to callers.
+    return NextResponse.json({ error: "Invalid webhook signature" }, { status: 400 });
   }
-
-  const supabaseAdmin = getSupabaseAdmin();
-  if (!supabaseAdmin) return NextResponse.json({ error: "Server not configured" }, { status: 500 });
-
-  const upsertFromSubscription = async (sub: Stripe.Subscription) => {
-    const userId = (sub?.metadata?.user_id ?? null) as string | null;
-    if (!userId) return;
-
-    const priceId = (sub?.items?.data?.[0]?.price?.id ?? null) as string | null;
-
-    // ✅ 兼容不同 stripe typings / payload 版本
-    const currentPeriodEndUnix =
-      getUnix(sub, "current_period_end") ??
-      getUnix(sub, "current_period_end_at") ??
-      getUnix(sub, "current_period_end_ts");
-
-    await supabaseAdmin.from("subscriptions").upsert({
-      user_id: userId,
-      stripe_customer_id: String(sub.customer),
-      stripe_subscription_id: String(sub.id),
-      price_id: priceId,
-      status: String(sub.status ?? "inactive"),
-      current_period_end: toIsoFromUnix(currentPeriodEndUnix),
+  if (event.livemode !== false) {
+    return NextResponse.json({ error: "Live events rejected" }, { status: 400 });
+  }
+  if (!SUBSCRIPTION_EVENTS.has(event.type)) {
+    return NextResponse.json({ received: true, ignored: true });
+  }
+  const subId = (event.data.object as { id?: unknown }).id;
+  if (typeof subId !== "string" || !subId.startsWith("sub_")) {
+    return NextResponse.json({ error: "Invalid subscription event" }, { status: 422 });
+  }
+  // Prevent accidental writes into the normal Supabase project during Stripe test mode.
+  // This env flag is a manual assertion, NOT a technical proof of isolation.
+  if (process.env.BILLING_TEST_DATABASE_ISOLATED !== "YES") {
+    return NextResponse.json({ error: "Isolated billing test database not acknowledged" }, { status: 503 });
+  }
+  const admin = getSupabaseAdmin();
+  if (!admin) return NextResponse.json({ error: "Server not configured" }, { status: 503 });
+  const allowedPriceIds = [
+    process.env.STRIPE_PRICE_BASIC,
+    process.env.STRIPE_PRICE_PRO,
+    process.env.STRIPE_PRICE_ENTERPRISE,
+  ].filter((id): id is string => Boolean(id));
+  if (allowedPriceIds.length !== 3 || new Set(allowedPriceIds).size !== 3) {
+    return NextResponse.json({ error: "Stripe test price configuration incomplete" }, { status: 503 });
+  }
+  try {
+    await reconcileTestSubscription({
+      subscriptionId: subId,
+      allowedPriceIds,
+      ports: {
+        retrieveSubscription: (id) => stripe.subscriptions.retrieve(id),
+        loadExisting: async (userId): Promise<StoredSubscription | null> => {
+          const { data: row, error: dbError } = await admin
+            .from("subscriptions")
+            .select("user_id,stripe_customer_id,stripe_subscription_id,status")
+            .eq("user_id", userId)
+            .maybeSingle();
+          if (dbError) throw new Error("SUBSCRIPTION_READ_FAILED");
+          return row;
+        },
+        upsertSubscription: async (row: SubscriptionWrite) => {
+          const { error: dbError } = await admin
+            .from("subscriptions")
+            .upsert(row, { onConflict: "user_id" });
+          if (dbError) throw new Error("SUBSCRIPTION_WRITE_FAILED");
+        },
+      },
     });
-  };
-
-  if (
-    event.type === "customer.subscription.created" ||
-    event.type === "customer.subscription.updated"
-  ) {
-    await upsertFromSubscription(event.data.object as Stripe.Subscription);
-  }
-
-  if (event.type === "customer.subscription.deleted") {
-    const sub = event.data.object as Stripe.Subscription;
-    const userId = (sub?.metadata?.user_id ?? null) as string | null;
-
-    if (userId) {
-      const priceId = (sub?.items?.data?.[0]?.price?.id ?? null) as string | null;
-
-      await supabaseAdmin.from("subscriptions").upsert({
-        user_id: userId,
-        stripe_customer_id: String(sub.customer),
-        stripe_subscription_id: String(sub.id),
-        price_id: priceId,
-        status: "canceled",
-        current_period_end: null,
-      });
+    // Returning 2xx only after the critical DB upsert succeeds.
+    return NextResponse.json({ received: true });
+  } catch (caught: unknown) {
+    if (caught instanceof BillingGuardError) {
+      // 409/422 deliberately remain non-2xx for investigation and Stripe retry.
+      return NextResponse.json({ error: caught.code }, { status: caught.statusCode });
     }
+    console.error("STRIPE_TEST_WEBHOOK_PROCESSING_FAILED");
+    return NextResponse.json({ error: "Webhook processing failed; retry" }, { status: 503 });
   }
-
-  return NextResponse.json({ received: true });
 }
